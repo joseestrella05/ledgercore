@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   GetAccounts,
   GetAccountBalances,
@@ -14,7 +14,6 @@ import {
   Scale,
   TrendingUp,
   PlusCircle,
-  RefreshCw,
   Database,
   CheckCircle2,
   AlertCircle,
@@ -44,6 +43,12 @@ export function App() {
   const [activeTab, setActiveTab] = useState<'balances' | 'journal'>('balances');
   const [typeFilter, setTypeFilter] = useState<string>('ALL');
 
+  // Reactivity State Mutation Version
+  const [mutationVersion, setMutationVersion] = useState<number>(0);
+  const triggerStateMutation = useCallback(() => {
+    setMutationVersion(v => v + 1);
+  }, []);
+
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [txDate, setTxDate] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -67,8 +72,19 @@ export function App() {
     }).format(dop);
   };
 
+  // Reset modal form fields
+  const resetModalForm = (accList: domain.Account[] = accounts) => {
+    setTxDate(new Date().toISOString().split('T')[0]);
+    setTxDesc('');
+    setTxRef('');
+    setEntries([
+      { accountId: accList[0]?.id || 0, entryType: 'DEBIT', amountDOP: '', notes: '' },
+      { accountId: accList[accList.length - 1]?.id || accList[1]?.id || 0, entryType: 'CREDIT', amountDOP: '', notes: '' }
+    ]);
+  };
+
   // Load all data
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const [sumRes, accRes, balRes, txRes, pathRes] = await Promise.all([
@@ -85,7 +101,7 @@ export function App() {
       setTransactions(txRes || []);
       setDbPath(pathRes || '');
 
-      // Set default account selections in modal if empty
+      // Set default account selections in modal if initial
       if (accRes && accRes.length >= 2 && entries[0].accountId === 0) {
         setEntries([
           { accountId: accRes[0].id, entryType: 'DEBIT', amountDOP: '', notes: '' },
@@ -98,11 +114,12 @@ export function App() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [entries]);
 
+  // Reactive listener for state mutations
   useEffect(() => {
     loadData();
-  }, []);
+  }, [mutationVersion]);
 
   // Filtered account balances
   const filteredBalances = useMemo(() => {
@@ -145,15 +162,37 @@ export function App() {
     setEntries(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Numeric input change with Auto-Balance on row 1 & intelligent entry type toggle
   const handleEntryChange = (index: number, field: keyof EntryRow, value: any) => {
     setEntries(prev => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
+      const next = prev.map((entry, i) => (i === index ? { ...entry, [field]: value } : entry));
+
+      // Auto-balance optimization:
+      // When typing the amount in the first entry of a 2-entry transaction,
+      // auto-fill the second entry with the matching value to balance to zero automatically
+      if (prev.length === 2 && field === 'amountDOP') {
+        if (index === 0) {
+          next[1] = {
+            ...next[1],
+            amountDOP: value
+          };
+        }
+      }
+
+      // Automatically maintain opposite entry types for 2-legged transactions
+      if (prev.length === 2 && field === 'entryType') {
+        const counterpartIdx = index === 0 ? 1 : 0;
+        next[counterpartIdx] = {
+          ...next[counterpartIdx],
+          entryType: value === 'DEBIT' ? 'CREDIT' : 'DEBIT'
+        };
+      }
+
       return next;
     });
   };
 
-  // Submit Transaction
+  // Submit Transaction: Automatic Reactivity & State Mutation
   const handleSubmitTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isBalanced || !txDesc.trim()) return;
@@ -176,19 +215,18 @@ export function App() {
 
       await CreateTransaction(payload);
 
-      // Reset form and reload
-      setTxDesc('');
-      setTxRef('');
-      setEntries([
-        { accountId: accounts[0]?.id || 0, entryType: 'DEBIT', amountDOP: '', notes: '' },
-        { accountId: accounts[accounts.length - 1]?.id || 0, entryType: 'CREDIT', amountDOP: '', notes: '' }
-      ]);
+      // a) Close modal automatically
       setIsModalOpen(false);
 
-      setFeedback({ type: 'success', message: 'Transacción registrada con éxito en el libro diario.' });
-      setTimeout(() => setFeedback(null), 5000);
+      // c) Reset form fields for the next transaction
+      resetModalForm();
 
-      await loadData();
+      // b) Reactive state mutation: trigger immediate re-evaluation of queries
+      triggerStateMutation();
+
+      // User feedback
+      setFeedback({ type: 'success', message: 'Transacción registrada con éxito. Balances actualizados automáticamente.' });
+      setTimeout(() => setFeedback(null), 5000);
     } catch (err: any) {
       console.error('Error registrando transacción:', err);
       setFeedback({ type: 'error', message: err?.message || String(err) });
@@ -199,7 +237,7 @@ export function App() {
 
   return (
     <div className="app-container">
-      {/* Top Header */}
+      {/* Top Header - Refresh button removed per specification */}
       <header className="app-header">
         <div className="header-brand">
           <div className="brand-icon-box">
@@ -217,9 +255,6 @@ export function App() {
         </div>
 
         <div className="header-actions">
-          <button className="btn-secondary" onClick={loadData} title="Refrescar datos">
-            <RefreshCw size={14} className={loading ? 'spin' : ''} /> Refrescar
-          </button>
           <button className="btn-primary" onClick={() => setIsModalOpen(true)}>
             <PlusCircle size={16} /> Nueva Transacción
           </button>
@@ -599,7 +634,7 @@ export function App() {
                         </div>
                       </div>
 
-                      {/* Amount in DOP */}
+                      {/* Amount in DOP with Auto-Balance */}
                       <div>
                         <input
                           type="number"
